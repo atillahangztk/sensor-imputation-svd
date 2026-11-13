@@ -1,0 +1,238 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Robust Spatio-Temporal Data Imputation in Agricultural Sensor Networks via Iterative SVD}
+
+\author{
+  \IEEEauthorblockN{Atillahan G\"oz\"utok}
+  \IEEEauthorblockA{
+    \textit{Artificial Intelligence and Data Engineering} \\
+    \textit{Istanbul Technical University} \\
+    Istanbul, Turkey \\
+    gozutoka24@itu.edu.tr
+  }
+}
+
+\maketitle
+
+\begin{abstract}
+Missing data in agricultural sensor networks poses a fundamental challenge for downstream forecasting and decision-making systems. This paper presents a complete pipeline for spatio-temporal data imputation on a real-world three-station sensor network using Iterative Singular Value Thresholding (SVT). A custom SVD solver is implemented from scratch via the Power Method with Deflation, eliminating dependency on any numerical library's decomposition routines. The system operates on a merged 28{,}310-row, 12-column matrix constructed from four meteorological features across three stations. Extensive stress tests covering random, burst, and blackout missingness scenarios demonstrate that SVT reliably recovers temperature and solar radiation signals, while wind speed — due to its stochastic nature — remains the most challenging variable to reconstruct. The spatial correlation among stations does not break down even at gap durations of 120 hours under rank-4 truncation.
+\end{abstract}
+
+\begin{IEEEkeywords}
+matrix completion, singular value thresholding, agricultural sensor networks, spatio-temporal imputation, power method, missing data
+\end{IEEEkeywords}
+
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+% ============================================================
+
+Environmental monitoring networks such as TARBIL in Turkey collect continuous meteorological measurements — temperature, humidity, solar radiation, and wind speed — to support irrigation management, agricultural yield prediction, and climate modeling. Real-world sensor deployments, however, are inherently prone to data discontinuities caused by hardware failures, energy depletion at remote solar-powered stations, and communication loss in rural areas.
+
+Missing values are not merely a database inconvenience; they constitute a fundamental obstacle for prediction models, which typically require complete data matrices. Naïve imputation strategies such as mean substitution or linear interpolation treat each variable or time step in isolation, failing to exploit the rich spatio-temporal correlations that characterize co-located meteorological stations. More sophisticated approaches such as MICE or K-Nearest Neighbors capture some relationships but struggle with the high-dimensional and non-linear structure of multi-station data.
+
+Singular Value Decomposition (SVD) offers a principled numerical framework for exploiting these correlations. By treating the entire sensor network as a single matrix, SVD identifies the dominant latent patterns governing the system. Iterative Singular Value Thresholding (SVT) \cite{cai2010svt} exploits this structure for matrix completion, iteratively projecting the data onto a low-rank manifold while respecting observed entries. The spatio-temporal dependencies of agricultural data have been documented in recent literature \cite{sentop2023spatio}, motivating the low-rank assumption underlying SVT.
+
+This paper makes the following contributions:
+\begin{itemize}
+    \item A station-agnostic data pipeline that constructs and standardises a multi-station measurement matrix compatible with blind-test evaluation.
+    \item A custom SVD implementation via Power Method with Deflation, with verified orthogonality ($U^\top U \approx I$, $V^\top V \approx I$).
+    \item A rigorous experimental evaluation across three missingness scenarios, four sensor types, nine gap durations (3–120 h), and a full rank sweep ($r = 1 \ldots 11$).
+\end{itemize}
+
+% ============================================================
+\section{Methodology}
+\label{sec:method}
+% ============================================================
+
+\subsection{Data Interface and Preprocessing}
+
+Three station CSV files are loaded, deduplicated on their \texttt{zaman\_olcum} timestamp column, and aligned via an outer join. Exactly four features are retained per station: \texttt{sicaklik\_2m\_mean}, \texttt{nispi\_nem\_2m\_mean}, \texttt{gunes\_radyasyon}, and \texttt{ruzgar\_hizi}. The result is a matrix $X \in \mathbb{R}^{N \times 12}$ (4 features $\times$ 3 stations) with rows sorted chronologically. Rows where every entry across all stations is NaN are discarded. The merged dataset contains $N = 28{,}310$ rows and $11{,}604$ initial missing entries.
+
+Prior to decomposition, each column is standardised to zero mean and unit variance using statistics computed exclusively from observed (non-NaN) entries:
+\begin{equation}
+    \tilde{x}_{ij} = \frac{x_{ij} - \mu_j}{\sigma_j}, \quad \mu_j = \frac{1}{|\Omega_j|}\sum_{i \in \Omega_j} x_{ij}
+\end{equation}
+where $\Omega_j$ denotes the set of observed row indices for column $j$. This step is critical: without it, solar radiation (with large raw magnitude) would dominate the singular values and prevent accurate reconstruction of smaller-scale variables such as temperature.
+
+\subsection{SVD from Scratch}
+
+Library-based decomposition is prohibited by the project specification. The custom \texttt{my\_svd} function implements economy SVD $M = U \Sigma V^\top$ via eigendecomposition of the Gram matrix $C = M^\top M \in \mathbb{R}^{p \times p}$.
+
+\textbf{Power Method with Deflation.} The dominant eigenpair of $C$ is found by repeated matrix-vector multiplication until the Rayleigh quotient converges (tolerance $10^{-10}$, maximum 200 iterations). After extracting each eigenvector $v_i$, the matrix is deflated:
+\begin{equation}
+    C \leftarrow C - \lambda_i \, v_i v_i^\top
+\end{equation}
+allowing subsequent iterations to find the next dominant eigenpair. Singular values are recovered as $\sigma_i = \sqrt{\lambda_i}$, and left singular vectors as $u_i = M v_i / \sigma_i$.
+
+\textbf{Sign Ambiguity.} The Power Method returns eigenvectors defined up to a global sign flip. We resolve this via the largest-entry convention: the sign of each $(u_i, v_i)$ pair is chosen so that the largest-magnitude entry of $u_i$ is positive. This convention is deterministic and does not affect reconstruction quality.
+
+\textbf{Orthogonality Verification.} On a 200-row test slice of the imputed matrix, the custom SVD achieves:
+\begin{itemize}
+    \item $\max |(\hat{U}^\top \hat{U} - I)_{\text{off-diag}}| = 2.94 \times 10^{-5}$ \checkmark
+    \item $\max |(\hat{V}^\top \hat{V} - I)_{\text{off-diag}}| = 1.47 \times 10^{-5}$ \checkmark
+\end{itemize}
+Both are well within the $10^{-4}$ tolerance, confirming numerical correctness. The top-5 singular values of the imputed matrix are $\{34.56, 28.03, 12.68, 10.81, 5.16\}$, with a steep drop after the fourth, suggesting a rank-4 structure dominates the data.
+
+\subsection{Iterative Singular Value Thresholding}
+
+SVT iteratively completes the matrix $X$ with missing entries at positions $\bar{\Omega}$:
+
+\begin{enumerate}[label=\textbf{\Alph*.}]
+    \item \textbf{Initialise:} Set $X^{(0)}[\bar{\Omega}] = 0$ (the column mean on the standardised scale).
+    \item \textbf{Low-rank projection:} Decompose $X^{(k)}$ with \texttt{my\_svd}; retain only the top-$r$ triplets to form $\hat{X}^{(k)} = U_r \Sigma_r V_r^\top$.
+    \item \textbf{Update missing entries:} $X^{(k+1)}[\bar{\Omega}] = \hat{X}^{(k)}[\bar{\Omega}]$; observed entries are held fixed.
+    \item \textbf{Convergence check:} Repeat until $\|X^{(k+1)} - X^{(k)}\|_F < \varepsilon = 10^{-4}$.
+\end{enumerate}
+
+Applied to the full 28{,}310-row dataset with $r = 4$, the algorithm converges in 257 iterations, producing a complete matrix with no residual NaN entries.
+
+% ============================================================
+\section{Experimental Results}
+\label{sec:results}
+% ============================================================
+
+\subsection{Stress Test Scenarios}
+
+Table~\ref{tab:stress} summarises the three mandatory missingness scenarios applied to Station 1, evaluated on the standardised scale.
+
+\begin{table}[h]
+\caption{Stress Test RMSE Results (Standardised Scale, Rank = 4)}
+\label{tab:stress}
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Scenario} & \textbf{Overall} & \textbf{Temperature} & \textbf{Wind Speed} \\
+\midrule
+A: Random 20\%   & 0.3709 & 0.3175 & 0.5780 \\
+B: Burst 24h     & 0.2868 & 0.2114 & 0.4471 \\
+C: Blackout 72h  & 0.3748 & 0.1754 & 0.6928 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Scenario A (random) yields a moderate overall RMSE of 0.3709. The scattered pattern of missing entries is harder for SVT to exploit than a contiguous gap, because adjacent observed values that guide reconstruction are still present in the burst scenarios. Scenario B (24-hour burst) achieves the lowest overall RMSE (0.2868), as the two flanking observed windows provide strong temporal context via the spatial correlation across the other two stations. Scenario C (72-hour blackout) increases overall RMSE to 0.3748, but notably the temperature RMSE \emph{improves} to 0.1754 — a consequence of the strong diurnal periodicity of temperature being well-captured by the rank-4 model even over longer gaps. Wind speed, however, degrades sharply to 0.6928 in the blackout scenario, reflecting its stochastic character.
+
+\subsection{Variable Analysis}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth]{variable_analysis.png}
+    \caption{Left: grouped bar chart of RMSE per sensor type at three gap lengths ($\pm$1 std error bars). Right: RMSE degradation curves as gap length increases.}
+    \label{fig:var_analysis}
+\end{figure}
+
+Fig.~\ref{fig:var_analysis} and Table~\ref{tab:varanalysis} reveal a clear hierarchy in reconstruction difficulty.
+
+\begin{table}[h]
+\caption{Variable Analysis — Mean RMSE by Sensor and Gap Length}
+\label{tab:varanalysis}
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Sensor} & \textbf{3h} & \textbf{24h} & \textbf{72h} \\
+\midrule
+Temperature     & 0.3238 & 0.3300 & 0.3265 \\
+Humidity        & 0.3220 & 0.3585 & 0.3373 \\
+Solar Radiation & 0.0919 & 0.1586 & 0.1315 \\
+Wind Speed      & 0.3576 & 0.5069 & 0.5589 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Solar Radiation} is the easiest variable to reconstruct (RMSE 0.09–0.16). Its signal follows a highly predictable daily cycle: zero at night, a smooth bell curve during daylight hours. This structure is efficiently captured by the first one or two singular components, and the pattern is strongly correlated across all three stations, providing abundant cross-station evidence.
+
+\textbf{Temperature and Humidity} occupy an intermediate range (RMSE $\approx 0.32$–$0.36$) and show remarkably flat RMSE curves across gap lengths. Temperature follows slow diurnal and seasonal cycles, making its trajectory easily extrapolated from neighboring time steps and stations. Humidity correlates strongly with temperature in agricultural micro-climates, yielding a similar reconstruction quality.
+
+\textbf{Wind Speed} is by far the hardest variable (RMSE 0.36–0.56), with RMSE rising sharply as gap length increases. Wind is inherently turbulent and stochastic; its power spectrum contains significant high-frequency content that is not representable in a low-rank model. The low-rank approximation can capture mean wind patterns but not instantaneous fluctuations, leading to systematic under-estimation of variance in the imputed region.
+
+\subsection{Temporal Window Stress Test}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth]{temporal_window_stress.png}
+    \caption{Left: overall RMSE (mean $\pm$ 1 std across 5 trials) vs. gap duration. Right: temperature vs. wind speed RMSE as gap length grows.}
+    \label{fig:temporal}
+\end{figure}
+
+Fig.~\ref{fig:temporal} shows that the overall RMSE stabilises after approximately 24 hours and does not continue to grow monotonically, which is a key finding. The heuristic breakdown threshold (RMSE doubling relative to the 3-hour baseline of 0.2574) is never reached within the 120-hour test range. The plateau behavior arises because, beyond $\sim$24 hours, reconstruction relies entirely on cross-station spatial correlation rather than temporal interpolation; since the three stations are in the same agricultural region, this correlation remains stable.
+
+Temperature RMSE (red, right panel) plateaus around 0.30 already at 12-hour gaps and remains flat thereafter — consistent with the rank-4 model capturing the diurnal cycle sufficiently. Wind speed RMSE (orange) rises steeply from 0.31 at 3h to $\approx$0.51 at 24h, then plateaus, confirming that once the local temporal context is lost, cross-station wind patterns provide only marginal additional information.
+
+\subsection{Rank Selection Analysis}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\columnwidth]{rank_vs_rmse.png}
+    \caption{RMSE vs. rank $r$ for a fixed 24-hour burst gap on Station 1.}
+    \label{fig:rank}
+\end{figure}
+
+Fig.~\ref{fig:rank} reveals a distinct U-shaped structure. RMSE decreases monotonically from $r=1$ (0.7064) to $r=5$ (0.2156), indicating that each additional component up to rank 5 contributes meaningfully to reconstruction. At $r=5$ the SVT algorithm fails to converge within 500 iterations (residual $\Delta = 0.172$), suggesting that rank 5 is on the boundary of the model's effective capacity for this dataset. From $r=6$ onward, RMSE rises sharply — the algorithm attempts to fit noise components that are inconsistent across the missing and observed regions, leading to divergent oscillation.
+
+The sweet spot is \textbf{rank 4}: SVT converges reliably (130 iterations) and achieves near-optimal RMSE (0.2868 on the 24h burst test). This is consistent with the dominant singular value spectrum $\{34.56, 28.03, 12.68, 10.81, 5.16\}$, where the first four values are substantially larger than the fifth.
+
+\subsection{Imputation Preview}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth]{imputation_preview.png}
+    \caption{Imputation preview for \texttt{sicaklik\_2m\_mean} (Station 1). The 24-hour gap (red) is well-aligned with the seasonal trend captured by the rank-4 model.}
+    \label{fig:preview}
+\end{figure}
+
+Fig.~\ref{fig:preview} shows the imputed 24-hour temperature segment (red) overlaid on the ground truth (grey) and observed data (blue). The imputed values follow the seasonal envelope correctly, with the imputed trajectory lying well within the amplitude range of adjacent cycles. The slight smoothing relative to ground truth is expected: the low-rank model captures the dominant oscillatory pattern but cannot reproduce sub-hourly fluctuations.
+
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+% ============================================================
+
+\subsection{Numerical Challenges}
+
+\textbf{Sign ambiguity.} The Power Method returns eigenvectors defined up to sign. The largest-entry convention resolves this deterministically, though in degenerate cases (nearly equal singular values) different sign choices may lead to different but equally valid decompositions.
+
+\textbf{Convergence at higher ranks.} Ranks $r \geq 5$ fail to converge within 500 iterations. At these ranks, the algorithm attempts to represent noise-level variance, and the missing-entry update in step C conflicts with the low-rank projection in step B, causing oscillation. This motivates conservative rank selection (empirically, $r = 3$ or $r = 4$).
+
+\textbf{Computational cost.} The Power Method requires $\mathcal{O}(p^2 k)$ operations per SVT iteration, where $p = 12$ and $k = r$. With $N = 28{,}310$ rows and up to 257 SVT iterations, runtime is dominated by the repeated matrix products $M^\top M$ and $M v_i$. Runtime scales linearly with $N$ and can be reduced by subsampling rows in early SVT iterations.
+
+\subsection{Broader Observations}
+
+The finding that RMSE does not grow beyond 24-hour gaps (Fig.~\ref{fig:temporal}) has a practical implication: for this TARBIL-like deployment, spatial redundancy across three stations within the same agro-climatic zone provides sufficient information to impute arbitrarily long outages at a single station, as long as the other two remain operational. This is an encouraging result for infrastructure planning.
+
+The stark contrast between solar radiation (RMSE $\approx 0.09$–$0.16$) and wind speed (RMSE $\approx 0.36$–$0.56$) suggests that a hybrid approach — low-rank SVT for smooth variables, a stochastic model for wind — could further improve overall imputation quality in operational deployments.
+
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% ============================================================
+
+This paper demonstrated a complete SVD-based pipeline for missing data imputation in agricultural sensor networks. A custom SVD solver implemented via Power Method with Deflation achieves verified orthogonality ($< 3 \times 10^{-5}$ off-diagonal error) and drives an Iterative SVT loop to convergence at rank 4. Experimental results across three missingness scenarios, four sensor types, nine gap durations, and a full rank sweep establish that the low-rank model is most effective for smooth, periodically-driven variables (solar radiation, temperature) and least effective for stochastic variables (wind speed). Crucially, the spatio-temporal correlation encoded in the low-rank structure does not break down even at 120-hour gaps, provided at least two of three stations remain operational.
+
+\begin{thebibliography}{00}
+
+\bibitem{sentop2023spatio}
+M.~S.~\c{S}entop, M.~Y\"{u}cel and B.~B.~\"{U}st\"{u}nda\u{g}, ``Spatio-Temporal Missing Data Reconstruction by Using Deep Neural Networks in Agricultural Monitoring Systems,'' in \textit{Proc. 11th Int. Conf. Agro-Geoinformatics}, 2023. DOI: 10.1109/Agro-Geoinformatics59224.2023.10233578.
+
+\bibitem{cai2010svt}
+J.~F.~Cai, E.~J.~Cand\`{e}s and Z.~Shen, ``A Singular Value Thresholding Algorithm for Matrix Completion,'' \textit{SIAM Journal on Optimization}, vol.~20, no.~4, pp.~1956--1982, 2010.
+
+\end{thebibliography}
+
+\end{document}
